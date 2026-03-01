@@ -1,5 +1,12 @@
 # ChangeLog
 
+# 2026/03/01 v1.3.2
+
+## 修复
+- 在调用指令函数前验证参数，以检测LLM返回的内容的合法性（[#1](https://github.com/PyuraMazo/astrbot_plugin_command_router/issues/1)）。
+
+---
+
 # 2026/03/01 v1.3.1
 
 ## 修复

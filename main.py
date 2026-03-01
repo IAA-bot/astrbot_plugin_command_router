@@ -1,3 +1,4 @@
+import inspect
 import json
 import re
 from collections.abc import AsyncIterator, Coroutine
@@ -55,7 +56,7 @@ class CommandBrief(BaseModel):
 class LLMResponse(BaseModel):
     matched: bool
     id: int | None = None
-    parameters: list[str] | None = None
+    parameters: dict[str, Any] | None = None
     confidence: float | None = None
     reason: str | None = None
 
@@ -172,11 +173,11 @@ class LLM:
         你是一个智能指令解析器。请分析用户的消息，判断用户意图是否匹配以下指令的效果。
         要求：
         1. 只匹配一个指令
-        2. 参数无论个数都返回数组（列表）类型
+        2. 无论是否有参数都返回字典类型（键值对）
         3. 返回的参数符合指令要求的参数个数、类型
-        4. 如果一个参数类型是GreedyStr，说明接受一个以空格作为分隔符的含有多个内容的字符串，这个字符串应该作为放在数组末尾
+        4. 如果一个参数类型是GreedyStr，说明接受一个以空格作为分隔符的含有多个内容的字符串
         
-        可用指令列表：
+        可用指令列表（args字典键是参数名，值是参数类型）：
         {self.cmd_str}
         
         用户消息: "{user_message}"
@@ -186,7 +187,7 @@ class LLM:
            {{
              "matched": true,
              "id": xxx, // 匹配指令的唯一id, int
-             "parameters": [arg1, arg2, ...], // 匹配指令的参数, array<string>
+             "parameters": {{'arg1': v1, 'arg2': v2, ...}}, // 匹配指令的参数, dict[str, Any]
              "confidence": number  // 匹配置信度, float, 取值0 ~ 1
            }}
         
@@ -261,7 +262,7 @@ class CommandRouterPlugin(Star):
         return True
 
     def describe_resp(self, resp: LLMResponse):
-        return f"{self.parser.id_dict[resp.id].split(':', 1)[1]}，参数：{' '.join(resp.parameters) or '无'}"
+        return f"{self.parser.id_dict[resp.id].split(':', 1)[1]}，参数：{' '.join(resp.parameters.values()) or '无'}"
 
     def reply(self, event: AstrMessageEvent, message: str):
         return event.chain_result(
@@ -283,24 +284,32 @@ class CommandRouterPlugin(Star):
             if hasattr(plugin_class, function_name) and is_sync:
                 if not meta.activated:
                     return
-                if not self.permission_filter(event, whole_body.permission):
-                    yield self.reply(
-                        event,
-                        f"成功匹配指令：{self.describe_resp(brief_body)}，但你无权调用。",
-                    )
-                    return
-                if self.config.get("matched_tips", False):
-                    yield self.reply(
-                        event, f"成功匹配指令：{self.describe_resp(brief_body)}。"
-                    )
 
                 actual_command = getattr(plugin_class, function_name)
-                result = actual_command(event, *args)
-                if isinstance(result, Coroutine):
-                    yield await result
-                elif isinstance(result, AsyncIterator):
-                    async for res in result:
-                        yield res
+                sig = inspect.signature(actual_command)
+                try:
+                    param = sig.bind(event, **args)
+                    if not self.permission_filter(event, whole_body.permission):
+                        yield self.reply(
+                            event,
+                            f"成功匹配指令：{self.describe_resp(brief_body)}，但你无权调用。",
+                        )
+                        return
+                    if self.config.get("matched_tips", False):
+                        yield self.reply(
+                            event, f"成功匹配指令：{self.describe_resp(brief_body)}。"
+                        )
+
+                    result = actual_command(**param.arguments)
+                    if isinstance(result, Coroutine):
+                        yield await result
+                    elif isinstance(result, AsyncIterator):
+                        async for res in result:
+                            yield res
+                except TypeError:
+                    logger.error(f"指令匹配成功，参数不匹配...{args}")
+                    return
+
             else:
                 if kwargs.get("try_again", True):
                     logger.info("指令状态异常，正在尝试同步...")
