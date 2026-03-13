@@ -68,8 +68,10 @@ class CommandParser:
         self.commands: dict[int, CommandInfo] = {}
         self.brief_map: dict[int, CommandBrief] = {}
         self.plugin_meta: dict[str, StarMetadata] = {}
+        self.plugin_desc: dict[str, str] = {}
+        self.plugin_contain: dict[str, list[int]] = {}
 
-        self.max_id = 0
+        self.max_id = 1
 
     async def initialize(self):
         await self.clear()
@@ -85,11 +87,12 @@ class CommandParser:
             self._build_dicts(info, params)
 
     async def clear(self):
-        self.max_id = 0
-        self.id_dict.clear()
-        self.commands.clear()
-        self.brief_map.clear()
-        self.plugin_meta.clear()
+        self.max_id = 1
+        self.id_dict = {}
+        self.commands = {}
+        self.brief_map = {}
+        self.plugin_meta = {}
+        self.plugin_desc = {}
 
     def _build_dicts(
         self,
@@ -98,20 +101,21 @@ class CommandParser:
     ):
         meta = self.context.get_registered_star(info.plugin)
         self.plugin_meta[info.plugin] = meta
+        self.plugin_desc[info.plugin] = meta.desc
+
         if not info.enabled:
             return
 
+        start = self.max_id
         if info.is_group:
             main_desc = info.description
             for sub_command in info.sub_commands:
-                self.max_id += 1
                 args = params.get(sub_command.current_fragment)
                 arg = {
                     name: args[name].__name__
                     for name in args
                     if isinstance(args[name], type)
                 }
-
                 self.id_dict[self.max_id] = (
                     f"{sub_command.plugin}:{sub_command.original_command}"
                 )
@@ -125,8 +129,8 @@ class CommandParser:
                     args=arg,
                     id=self.max_id,
                 )
+                self.max_id += 1
         else:
-            self.max_id += 1
             args = params.get(info.current_fragment)
             arg = {
                 name: args[name].__name__
@@ -143,6 +147,9 @@ class CommandParser:
                 args=arg,
                 id=self.max_id,
             )
+            self.max_id += 1
+        end = self.max_id
+        self.plugin_contain[info.plugin] = list(range(start, end))
 
 
 class LLM:
@@ -151,54 +158,65 @@ class LLM:
         context: Context,
         config: AstrBotConfig,
         brief_map: dict[int, CommandBrief],
+        plugin_desc: dict[str, str]
     ):
         self.context = context
         self.config = config
         self.brief_map = brief_map
+        self.plugin_desc = plugin_desc
         self.response_pattern = re.compile(r"\{.*}", re.S)
 
-        self.cmd_str: str | None = None
 
-    async def after_initialize(self):
-        self.cmd_str = self.build_cmd_str()
+    def build_prompt(self, user_message: str, **kwargs) -> str:
+        plugins = kwargs.get('plugins', [])
+        if not plugins:
+            return f"""
+                    你是一个智能指令解析器。请分析用户的消息，根据以下备选插件列表的插件描述，判断用户是否想要调用插件中的功能。
+                    要求：如果不符合任何插件的描述，返回空列表。
+                    
+                    备选插件列表（键为插件名，值为插件描述）：
+                    {self.plugin_desc}
 
-    def build_cmd_str(self):
-        str_list = [
-            json.dumps(self.brief_map[cmd].model_dump()) for cmd in self.brief_map
-        ]
-        return str(str_list)
+                    用户消息: "{user_message}"
 
-    def build_prompt(self, user_message: str) -> str:
-        return f"""
-        你是一个智能指令解析器。请分析用户的消息，判断用户意图是否匹配以下指令的效果。
-        要求：
-        1. 只匹配一个指令
-        2. 无论是否有参数都返回字典类型（键值对）
-        3. 返回的参数符合指令要求的参数个数、类型
-        4. 如果一个参数类型是GreedyStr，说明接受一个以空格作为分隔符的含有多个内容的字符串
-        
-        可用指令列表（args字典键是参数名，值是参数类型）：
-        {self.cmd_str}
-        
-        用户消息: "{user_message}"
-        
-        请按以下格式分析：
-        1. 如果匹配某个指令，请返回：
-           {{
-             "matched": true,
-             "id": xxx, // 匹配指令的唯一id, int
-             "parameters": {{'arg1': v1, 'arg2': v2, ...}}, // 匹配指令的参数, dict[str, Any]
-             "confidence": number  // 匹配置信度, float, 取值0 ~ 1
-           }}
-        
-        2. 如果不匹配任何指令，请返回：
-           {{
-             "matched": false,
-             "reason": "xxx" // 不匹配的原因简要说明
-           }}
-        
-        请确保参数提取准确，只返回JSON格式的字符串结果，不要有任何其他的文本信息。
-        """
+                    请按以下格式分析：
+                       {{
+                         "plugins": [key1, key2, ...] // 插件名，list[str]
+                       }}
+
+                    请确保只返回JSON格式的字符串结果，不要有任何其他的文本信息。
+                    """
+        else:
+            return f"""
+                    你是一个智能指令解析器。请分析用户的消息，判断用户意图是否匹配以下指令的效果。
+                    要求：
+                    1. 只匹配一个指令
+                    2. 无论是否有参数都返回字典类型（键值对）
+                    3. 返回的参数符合指令要求的参数个数、类型
+                    4. 如果一个参数类型是GreedyStr，说明接受一个以空格作为分隔符的含有多个内容的字符串
+
+                    可用指令列表（args字典键是参数名，值是参数类型）：
+                    {plugins}
+
+                    用户消息: "{user_message}"
+
+                    请按以下格式分析：
+                    1. 如果匹配某个指令，请返回：
+                       {{
+                         "matched": true,
+                         "id": xxx, // 匹配指令的唯一id, int
+                         "parameters": {{'arg1': v1, 'arg2': v2, ...}}, // 匹配指令的参数, dict[str, Any]
+                         "confidence": number  // 匹配置信度, float, 取值0 ~ 1
+                       }}
+
+                    2. 如果不匹配任何指令，请返回：
+                       {{
+                         "matched": false,
+                         "reason": "xxx" // 不匹配的原因简要说明
+                       }}
+
+                    请确保参数提取准确，只返回JSON格式的字符串结果，不要有任何其他的文本信息。
+                    """
 
     async def get_provider(self, umo: str):
         provider_id = self.config.get("text_provider_id", "")
@@ -209,28 +227,32 @@ class LLM:
                 raise NoProviderException("LLM供应商获取错误！")
         return provider_id
 
-    async def submit(self, event: AstrMessageEvent):
+    async def submit(self, event: AstrMessageEvent, **kwargs):
+        print(self.build_prompt(event.message_str, **kwargs))
         llm_resp = await self.context.llm_generate(
             chat_provider_id=await self.get_provider(event.unified_msg_origin),
-            prompt=self.build_prompt(event.message_str),
+            prompt=self.build_prompt(event.message_str, **kwargs),
         )
         text_resp = llm_resp.completion_text
-        formated = self.response_pattern.findall(text_resp)[0]
-        return LLMResponse.model_validate(json.loads(formated))
+        print(text_resp)
+        return json.loads(self.response_pattern.findall(text_resp)[0])
 
 
 class CommandRouterPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
+        self.context = context
         self.config = config
         self.wake_prefix = []
 
         self.parser = CommandParser(context)
-        self.llm = LLM(context, self.config, self.parser.brief_map)
+        self.llm: LLM | None = None
 
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
-        await self.after_initialized()
+        await self.parser.initialize()
+        self.llm = LLM(self.context, self.config, self.parser.brief_map, self.parser.plugin_desc)
+
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
@@ -270,7 +292,15 @@ class CommandRouterPlugin(Star):
         )
 
     async def core_handler(self, event: AstrMessageEvent, **kwargs):
-        brief_body = await self.llm.submit(event)
+        plugins: list[str] = (await self.llm.submit(event))['plugins']
+        validated = []
+        for i in plugins:
+            if i in self.parser.plugin_desc:
+                for j in self.parser.plugin_contain[i]:
+                    validated.append(self.parser.brief_map[j].model_dump())
+        if not validated:
+            return
+        brief_body = LLMResponse.model_validate(await self.llm.submit(event, plugins=validated))
         if brief_body.matched:
             whole_body = self.parser.commands[brief_body.id]
             meta = self.parser.plugin_meta[whole_body.plugin]
@@ -313,7 +343,7 @@ class CommandRouterPlugin(Star):
             else:
                 if kwargs.get("try_again", True):
                     logger.info("指令状态异常，正在尝试同步...")
-                    await self.after_initialized()
+                    await self.initialize()
                     async for res in self.core_handler(event, try_again=False):
                         yield res
                 else:
@@ -321,7 +351,7 @@ class CommandRouterPlugin(Star):
 
     async def handle_meta_change(self):
         old = set(self.parser.plugin_meta)
-        await self.after_initialized()
+        await self.initialize()
         new = set(self.parser.plugin_meta)
         if old == new:
             return "同步成功！\n未发现增删插件。"
@@ -329,10 +359,9 @@ class CommandRouterPlugin(Star):
             return f"同步成功！\n新增插件：{'、'.join(new - old) or '无'}\n删除插件：{'、'.join(old - new) or '无'}"
 
     @filter.on_astrbot_loaded()
-    async def after_initialized(self):
+    async def lazy_initialize(self):
         """延迟初始化"""
-        await self.parser.initialize()
-        await self.llm.after_initialize()
+        await self.initialize()
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=-100)
     async def global_parser(self, event: AstrMessageEvent):
