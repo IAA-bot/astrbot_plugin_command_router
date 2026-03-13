@@ -149,7 +149,11 @@ class CommandParser:
             )
             self.max_id += 1
         end = self.max_id
-        self.plugin_contain[info.plugin] = list(range(start, end))
+        plu = self.plugin_contain.get(info.plugin, [])
+        if plu:
+            plu.extend(list(range(start, end)))
+        else:
+            self.plugin_contain[info.plugin] = list(range(start, end))
 
 
 class LLM:
@@ -158,7 +162,7 @@ class LLM:
         context: Context,
         config: AstrBotConfig,
         brief_map: dict[int, CommandBrief],
-        plugin_desc: dict[str, str]
+        plugin_desc: dict[str, str],
     ):
         self.context = context
         self.config = config
@@ -166,20 +170,19 @@ class LLM:
         self.plugin_desc = plugin_desc
         self.response_pattern = re.compile(r"\{.*}", re.S)
 
-
     def build_prompt(self, user_message: str, **kwargs) -> str:
-        plugins = kwargs.get('plugins', [])
+        plugins = kwargs.get("plugins", [])
         if not plugins:
             return f"""
                     你是一个智能指令解析器。请分析用户的消息，根据以下备选插件列表的插件描述，判断用户是否想要调用插件中的功能。
-                    要求：如果不符合任何插件的描述，返回空列表。
+                    要求：最多选择3个。如果不符合任何插件的描述，返回空列表。
                     
                     备选插件列表（键为插件名，值为插件描述）：
                     {self.plugin_desc}
 
                     用户消息: "{user_message}"
 
-                    请按以下格式分析：
+                    请按以下格式返回：
                        {{
                          "plugins": [key1, key2, ...] // 插件名，list[str]
                        }}
@@ -228,13 +231,11 @@ class LLM:
         return provider_id
 
     async def submit(self, event: AstrMessageEvent, **kwargs):
-        print(self.build_prompt(event.message_str, **kwargs))
         llm_resp = await self.context.llm_generate(
             chat_provider_id=await self.get_provider(event.unified_msg_origin),
             prompt=self.build_prompt(event.message_str, **kwargs),
         )
         text_resp = llm_resp.completion_text
-        print(text_resp)
         return json.loads(self.response_pattern.findall(text_resp)[0])
 
 
@@ -251,8 +252,9 @@ class CommandRouterPlugin(Star):
     async def initialize(self):
         """可选择实现异步的插件初始化方法，当实例化该插件类之后会自动调用该方法。"""
         await self.parser.initialize()
-        self.llm = LLM(self.context, self.config, self.parser.brief_map, self.parser.plugin_desc)
-
+        self.llm = LLM(
+            self.context, self.config, self.parser.brief_map, self.parser.plugin_desc
+        )
 
     async def terminate(self):
         """可选择实现异步的插件销毁方法，当插件被卸载/停用时会调用。"""
@@ -292,7 +294,7 @@ class CommandRouterPlugin(Star):
         )
 
     async def core_handler(self, event: AstrMessageEvent, **kwargs):
-        plugins: list[str] = (await self.llm.submit(event))['plugins']
+        plugins: list[str] = (await self.llm.submit(event))["plugins"]
         validated = []
         for i in plugins:
             if i in self.parser.plugin_desc:
@@ -300,7 +302,9 @@ class CommandRouterPlugin(Star):
                     validated.append(self.parser.brief_map[j].model_dump())
         if not validated:
             return
-        brief_body = LLMResponse.model_validate(await self.llm.submit(event, plugins=validated))
+        brief_body = LLMResponse.model_validate(
+            await self.llm.submit(event, plugins=validated)
+        )
         if brief_body.matched:
             whole_body = self.parser.commands[brief_body.id]
             meta = self.parser.plugin_meta[whole_body.plugin]
@@ -372,6 +376,7 @@ class CommandRouterPlugin(Star):
         try:
             async for res in self.core_handler(event):
                 yield res
+            event._has_send_oper = not self.config.get("always_llm", False)
         except PluginBaseException as e1:
             yield self.reply(event, str(e1))
             logger.error(e1, exc_info=True)
@@ -384,6 +389,7 @@ class CommandRouterPlugin(Star):
         try:
             async for res in self.core_handler(event):
                 yield res
+            event._has_send_oper = not self.config.get("always_llm", False)
         except PluginBaseException as e1:
             yield self.reply(event, str(e1))
             logger.error(e1, exc_info=True)

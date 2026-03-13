@@ -1,5 +1,15 @@
 # ChangeLog
 
+# 2026/03/13 v1.4.0
+
+## 新增
+- 增加配置项`总是唤醒LLM`，可以让消息时间穿过本插件继续向后传递，即唤醒LLM回复。
+
+## 修复
+- 采用两阶段请求，减少向LLM发送的文本量，显著减少token浪费（[#2](https://github.com/PyuraMazo/astrbot_plugin_command_router/issues/2)）。
+
+---
+
 # 2026/03/01 v1.3.2
 
 ## 修复
