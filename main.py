@@ -246,6 +246,10 @@ class CommandRouterPlugin(Star):
         self.config = config
         self.wake_prefix = []
 
+        self.always_llm = self.config.get("always_llm", False)
+        self.enable_global_match = self.config.get("enable_global_match", True)
+        self.activate_by_wake = self.config.get("activate_by_wake", True)
+
         self.parser = CommandParser(context)
         self.llm: LLM | None = None
 
@@ -267,13 +271,13 @@ class CommandRouterPlugin(Star):
     def match_filter(self, event: AstrMessageEvent):
         if (
             event._has_send_oper  # 已经有指令向用户发送过消息，触发指令的识别标志
-            or not self.config.get("enable_global_match", True)  # 未开启全局模式
+            or not self.enable_global_match  # 未开启全局模式
             or not event.message_str  # 发送空文本
         ):
             return False
 
         # 唤醒触发
-        if self.config.get("activate_by_wake", True):
+        if self.activate_by_wake:
             if not event.is_at_or_wake_command:
                 return False
 
@@ -382,12 +386,12 @@ class CommandRouterPlugin(Star):
             # Only mark the event as handled (to block further handlers) if this plugin
             # actually sent a response. If `always_llm` is enabled we keep allowing
             # other handlers to run (don't mark as handled).
-            event._has_send_oper = sent and not self.config.get("always_llm", False)
+            event._has_send_oper = sent and not self.always_llm
         except PluginBaseException as e1:
             # We do send a reply in this error case, so mark the event handled
             # (unless always_llm is set).
             yield self.reply(event, str(e1))
-            event._has_send_oper = True and not self.config.get("always_llm", False)
+            event._has_send_oper = True and not self.always_llm
             logger.error(e1, exc_info=True)
         except Exception as e2:
             logger.error(e2, exc_info=True)
@@ -402,12 +406,12 @@ class CommandRouterPlugin(Star):
                 yield res
 
             # Same behavior as global_parser — only mark handled when something was sent.
-            event._has_send_oper = sent and not self.config.get("always_llm", False)
+            event._has_send_oper = sent and not self.always_llm
         except PluginBaseException as e1:
             # We do send a reply in this error case, so mark the event handled
             # (unless always_llm is set).
             yield self.reply(event, str(e1))
-            event._has_send_oper = True and not self.config.get("always_llm", False)
+            event._has_send_oper = True and not self.always_llm
             logger.error(e1, exc_info=True)
         except Exception as e2:
             logger.error(e2, exc_info=True)
